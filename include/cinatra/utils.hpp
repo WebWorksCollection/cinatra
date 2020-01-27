@@ -182,6 +182,29 @@ namespace cinatra {
 		return true;
 	}
 
+    inline bool iequal(const char *s, size_t l, const char *t, size_t size) {
+        if (size != l)
+            return false;
+
+        for (size_t i = 0; i < l; i++) {
+            if (std::tolower(s[i]) != std::tolower(t[i]))
+                return false;
+        }
+
+        return true;
+    }
+
+	template<typename T>
+	inline bool find_strIC(const T & src, const T & dest)
+	{
+		auto it = std::search(
+			src.begin(), src.end(),
+			dest.begin(), dest.end(),
+			[](char ch1, char ch2) { return std::toupper(ch1) == std::toupper(ch2); }
+		);
+		return (it != src.end());
+	}
+
 	inline std::vector<std::string_view> split(std::string_view s, std::string_view delimiter) {
 		size_t start = 0;
 		size_t end = s.find_first_of(delimiter);
@@ -252,7 +275,7 @@ namespace cinatra {
         return strval;
     }
 
-	std::string form_urldecode(const std::string &src) {
+	inline std::string form_urldecode(const std::string &src) {
 		std::string ret;
 		char ch;
 		int i, ii;
@@ -411,19 +434,47 @@ namespace cinatra {
 		}
 	}
 
-#define HAS_MEMBER(member)\
-template<typename T, typename... Args>\
-struct has_##member\
-{\
-private:\
-    template<typename U> static auto Check(int) -> decltype(std::declval<U>().member(std::declval<Args>()...), std::true_type()); \
-	template<typename U> static std::false_type Check(...);\
-public:\
-	enum{value = std::is_same<decltype(Check<T>(0)), std::true_type>::value};\
-};
+	//for is_detective
+	namespace {
+		struct nonesuch {
+			nonesuch() = delete;
+			~nonesuch() = delete;
+			nonesuch(const nonesuch&) = delete;
+			void operator=(const nonesuch&) = delete;
+		};
 
-	HAS_MEMBER(before)
-	HAS_MEMBER(after)
+		template<class Default, class AlwaysVoid,
+			template<class...> class Op, class... Args>
+		struct detector {
+			using value_t = std::false_type;
+			using type = Default;
+		};
+
+
+		template<class Default, template<class...> class Op, class... Args>
+		struct detector<Default, std::void_t<Op<Args...>>, Op, Args...> {
+			using value_t = std::true_type;
+			using type = Op<Args...>;
+		};
+
+		template<template<class...> class Op, class... Args>
+		using is_detected = typename detector<nonesuch, void, Op, Args...>::value_t;
+
+		template<template<class...> class Op, class... Args>
+		using detected_t = typename detector<nonesuch, void, Op, Args...>::type;
+
+		template<class T, typename... Args>
+		using has_before_t = decltype(std::declval<T>().before(std::declval<Args>()...));
+
+		template<class T, typename... Args>
+		using has_after_t = decltype(std::declval<T>().after(std::declval<Args>()...));
+	}
+	
+	template<typename T, typename... Args>
+	using has_before = is_detected<has_before_t, T, Args...>;
+
+	template<typename T, typename... Args>
+	using has_after = is_detected<has_after_t, T, Args...>;
 
 	template <typename... Args, typename F, std::size_t... Idx>
 	constexpr void for_each_l(std::tuple<Args...>& t, F&& f, std::index_sequence<Idx...>) {
@@ -451,6 +502,15 @@ public:\
 		return arr;
 	}
 
+	template<http_method... Is>
+	constexpr auto get_method_arr() {
+		std::array<char, 26> arr{0};
+		std::string_view s;
+		((s = type_to_name(std::integral_constant<http_method, Is>{}), arr[s[0]-65] = s[0]), ...);
+
+		return arr;
+	}
+
 	inline std::string get_time_str(std::time_t t) {
 		std::stringstream ss;
 		ss << std::put_time(std::localtime(&t), "%Y-%m-%d %H:%M:%S");
@@ -469,7 +529,7 @@ public:\
 		return get_time_str(std::time(nullptr));
 	}
 
-	const std::map<std::string_view, std::string_view> get_cookies_map(std::string_view cookies_str)
+	inline const std::map<std::string_view, std::string_view> get_cookies_map(std::string_view cookies_str)
 	{
 		std::map<std::string_view, std::string_view> cookies;
 		auto cookies_vec = split(cookies_str,"; ");

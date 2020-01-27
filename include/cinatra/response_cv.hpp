@@ -15,6 +15,7 @@ namespace cinatra {
 		moved_permanently = 301,
 		moved_temporarily = 302,
 		not_modified = 304,
+		temporary_redirect = 307,
 		bad_request = 400,
 		unauthorized = 401,
 		forbidden = 403,
@@ -58,6 +59,12 @@ namespace cinatra {
 		"<html>"
 		"<head><title>Moved Permanently</title></head>"
 		"<body><h1>301 Moved Permanently</h1></body>"
+		"</html>";
+
+	inline std::string_view temporary_redirect =
+		"<html>"
+		"<head><title>Temporary Redirect</title></head>"
+		"<body><h1>307 Temporary Redirect</h1></body>"
 		"</html>";
 
 	inline std::string_view moved_temporarily =
@@ -128,6 +135,7 @@ namespace cinatra {
 	inline std::string_view rep_partial_content = "HTTP/1.1 206 Partial Content\r\n";
 	inline std::string_view rep_multiple_choices = "HTTP/1.1 300 Multiple Choices\r\n";
 	inline std::string_view rep_moved_permanently =	"HTTP/1.1 301 Moved Permanently\r\n";
+	inline std::string_view rep_temporary_redirect =	"HTTP/1.1 307 Temporary Redirect\r\n";
 	inline std::string_view rep_moved_temporarily =	"HTTP/1.1 302 Moved Temporarily\r\n";
 	inline std::string_view rep_not_modified = "HTTP/1.1 304 Not Modified\r\n";
 	inline std::string_view rep_bad_request = "HTTP/1.1 400 Bad Request\r\n";
@@ -138,6 +146,11 @@ namespace cinatra {
 	inline std::string_view rep_not_implemented = "HTTP/1.1 501 Not Implemented\r\n";
 	inline std::string_view rep_bad_gateway = "HTTP/1.1 502 Bad Gateway\r\n";
 	inline std::string_view rep_service_unavailable = "HTTP/1.1 503 Service Unavailable\r\n";
+
+	inline std::string_view rep_html = "Content-Type: text/html; charset=UTF-8\r\n";
+    inline std::string_view rep_json = "Content-Type: application/json; charset=UTF-8\r\n";
+    inline std::string_view rep_string = "Content-Type: text/plain; charset=UTF-8\r\n";
+    inline std::string_view rep_multipart = "Content-Type: multipart/form-data; boundary=";
 
 	inline const char name_value_separator[] = { ':', ' ' };
 	//inline std::string_view crlf = "\r\n";
@@ -174,6 +187,8 @@ namespace cinatra {
 			return boost::asio::buffer(rep_multiple_choices.data(), rep_multiple_choices.length());
 		case status_type::moved_permanently:
 			return boost::asio::buffer(rep_moved_permanently.data(), rep_moved_permanently.length());
+		case status_type::temporary_redirect:
+			return boost::asio::buffer(rep_temporary_redirect.data(), rep_temporary_redirect.length());
 		case status_type::moved_temporarily:
 			return boost::asio::buffer(rep_moved_temporarily.data(), rep_moved_temporarily.length());
 		case status_type::not_modified:
@@ -199,6 +214,71 @@ namespace cinatra {
 		}
 	}
 
+	inline std::string_view to_rep_string(status_type status) {
+		switch (status) {
+		case cinatra::status_type::switching_protocols:
+			return switching_protocols;
+			break;
+		case cinatra::status_type::ok:
+			return rep_ok;
+			break;
+		case cinatra::status_type::created:
+			return rep_created;
+			break;
+		case cinatra::status_type::accepted:
+			return rep_accepted;
+			break;
+		case cinatra::status_type::no_content:
+			return rep_no_content;
+			break;
+		case cinatra::status_type::partial_content:
+			return rep_partial_content;
+			break;
+		case cinatra::status_type::multiple_choices:
+			return rep_multiple_choices;
+			break;
+		case cinatra::status_type::moved_permanently:
+			return rep_moved_permanently;
+			break;
+		case cinatra::status_type::moved_temporarily:
+			return rep_moved_temporarily;
+			break;
+		case cinatra::status_type::not_modified:
+			return rep_not_modified;
+			break;
+		case cinatra::status_type::temporary_redirect:
+			return rep_temporary_redirect;
+			break;
+		case cinatra::status_type::bad_request:
+			return rep_bad_request;
+			break;
+		case cinatra::status_type::unauthorized:
+			return rep_unauthorized;
+			break;
+		case cinatra::status_type::forbidden:
+			return rep_forbidden;
+			break;
+		case cinatra::status_type::not_found:
+			return rep_not_found;
+			break;
+		case cinatra::status_type::internal_server_error:
+			return rep_internal_server_error;
+			break;
+		case cinatra::status_type::not_implemented:
+			return rep_not_implemented;
+			break;
+		case cinatra::status_type::bad_gateway:
+			return rep_bad_gateway;
+			break;
+		case cinatra::status_type::service_unavailable:
+			return rep_service_unavailable;
+			break;
+		default:
+			return rep_not_implemented;
+			break;
+		}
+	}
+
 	inline std::string_view to_string(status_type status) {
 		switch (status) {
 		case status_type::ok:
@@ -215,6 +295,8 @@ namespace cinatra {
 			return moved_permanently;
 		case status_type::moved_temporarily:
 			return moved_temporarily;
+		case status_type::temporary_redirect:
+			return temporary_redirect;
 		case status_type::not_modified:
 			return not_modified;
 		case status_type::bad_request:

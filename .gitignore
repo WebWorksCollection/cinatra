@@ -3,6 +3,7 @@
 .idea
 cmake-build-debug
 .vscode
+*.swp
 # Compiled Object files
 *.slo
 *.lo
@@ -32,3 +33,11 @@ cmake-build-debug
 *.exe
 *.out
 *.app
+
+# Eclipse
+/build/
+.project
+.cproject
+.settings
+
+/example/build/

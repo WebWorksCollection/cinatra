@@ -1,5 +1,9 @@
 # cinatra--一个高效易用的c++ http框架
 
+<p align="center">
+  <a href="https://github.com/qicosmos/cinatra/tree/master/lang/english">English</a> | <span>中文</span>
+</p>
+
 # 目录
 
 * [cinatra简介](#cinatra简介)
@@ -39,7 +43,7 @@ cinatra是header-only的，直接引用头文件既可。
 
 ## 示例1：一个简单的hello world
 
-	#include "http_server.hpp"
+	#include "cinatra.hpp"
 	using namespace cinatra;
 	
 	int main() {
@@ -58,7 +62,7 @@ cinatra是header-only的，直接引用头文件既可。
 
 ## 示例2：展示如何取header和query以及错误返回
 
-	#include "http_server.hpp"
+	#include "cinatra.hpp"
 	using namespace cinatra;
 	
 	int main() {
@@ -86,7 +90,7 @@ cinatra是header-only的，直接引用头文件既可。
 
 ## 示例3：面向切面的http服务器
 
-	#include "http_server.hpp"
+	#include "cinatra.hpp"
 	using namespace cinatra;
 
 	//日志切面
@@ -139,7 +143,7 @@ cinatra目前支持了multipart和octet-stream格式的上传。
 ### multipart文件上传
 
 	#include <atomic>
-	#include "http_server.hpp"
+	#include "cinatra.hpp"
 	using namespace cinatra;
 	
 	int main() {
@@ -167,7 +171,7 @@ cinatra目前支持了multipart和octet-stream格式的上传。
 ### octet-stream文件上传
 
 	#include <atomic>
-	#include "http_server.hpp"
+	#include "cinatra.hpp"
 	using namespace cinatra;
 	
 	int main() {
@@ -197,7 +201,7 @@ cinatra目前支持了multipart和octet-stream格式的上传。
 
 ## 示例6：websocket
 
-	#include "http_server.hpp"
+	#include "cinatra.hpp"
 	using namespace cinatra;
 	
 	int main() {
@@ -237,7 +241,7 @@ cinatra目前支持了multipart和octet-stream格式的上传。
 本代码演示如何使用io_service_inplace，然后自己控制http server的运行线程以及循环。
 使用 [http://[::1]:8080/close] （IPv6） 或者 [http://127.0.0.1:8080/close] (IPv4) 来关闭http server。
 
-	#include "http_server.hpp"
+	#include "cinatra.hpp"
 	using namespace cinatra;
 
 	int main() {
@@ -263,23 +267,121 @@ cinatra目前支持了multipart和octet-stream格式的上传。
 		return 0;
 	}
 
+## cinatra客户端使用
+
+### 发get/post消息
+```
+auto client = cinatra::client_factory::instance().new_client("127.0.0.1", "8080");
+client->send_msg("/string", "hello"); //post json, default timeout is 3000ms
+client->send_msg<TEXT>("/string", "hello"); //post string, default timeout is 3000ms
+
+client->send_msg<TEXT, 2000>("/string", "hello"); //post string, timeout is 2000ms
+
+client->send_msg<TEXT, 3000, GET>("/string", "hello"); //get string, timeout is 3000ms
+```
+
+### 文件上传
+
+异步文件上传接口，只需要提供文件名即可。目前的接口只支持单个文件的上传，后续会支持多文件的上传。
+注意：在client文件上传结束之前不要重新上传文件。
+
+```
+auto client = cinatra::client_factory::instance().new_client("127.0.0.1", "8080");
+client->on_progress([](std::string progress) {
+	std::cout << progress << "\n";
+});
+
+client->upload_file("/upload_multipart", filename, [](auto ec) {
+	if (ec) {
+		std::cout << "upload failed, reason: "<<ec.message();
+	}
+	else {
+		std::cout << "upload successful\n";
+	}
+});
+```
+
+如果要支持多文件上传，可以通过遍历方式上传：
+```
+	for (auto& filename : v) {
+
+		auto client = cinatra::client_factory::instance().new_client("127.0.0.1", "8080");
+		client->on_progress([](std::string progress) {
+			std::cout << progress << "\n";
+		});
+
+		client->upload_file("/upload_multipart", filename, [](auto ec) {
+			if (ec) {
+				std::cout << "upload failed, reason: "<<ec.message();
+			}
+			else {
+				std::cout << "upload successful\n";
+			}
+		});
+
+	}
+```
+
+### 文件下载
+
+```
+auto client = cinatra::client_factory::instance().new_client("127.0.0.1", "8080");
+auto s = "/public/static/test1.png";
+auto filename = std::filesystem::path(s).filename().string();
+client->download_file("temp", filename, s, [](auto ec) {
+	if (ec) {
+		std::cout << ec.message() << "\n";
+	}
+	else {
+		std::cout << "ok\n";
+	}
+});
+```
+先建立连接，输入ip("127.0.0.1", "8080")或域名("purecpp.org", "http")；
+downlad_file接口第一个参数是下载目录，这个参数可以不填，如果不填则下载到当前目录；
+第二个参数是需要保存的文件名；
+第三个参数是静态资源的路径，注意要带上斜杠；
+第四个参数是下载的回调，如果没有错误就表示下载完成，否则为下载出错；
+
+#### 设置下载的用户回调
+```
+client->on_length([](size_t length){
+	std::cout<<"recieved data length: "<<length<<"\n";
+});
+
+client->on_data([](std::string_view data){
+	std::cout<<"recieved data: "<<data<<"\n";
+});
+```
+on_length回调下载的数据的长度；
+on_data回调下下载的数据，注意，如果设置了on_data，cinatra将不会去将下载的数据存到文件中，而是完全交给用户去处理；如果没有设置该回调则会默认存文件。
+
+```
+	boost::asio::ssl::context ctx(boost::asio::ssl::context::sslv23);
+	ctx.set_default_verify_paths();
+
+	auto client = cinatra::client_factory::instance().new_client("127.0.0.1", "https", ctx);
+	client->on_length([](size_t _length) {
+		std::cout << "download file: on_length: " << _length << std::endl;
+	});
+	client->download_file("test.jpg", "/public/static/test.jpg", [](boost::system::error_code ec) {
+		std::cout << "download file: on_complete: " << (!ec ? "true - " : "false - ") << (ec ? ec.message() : "") << std::endl;
+	});
+
+	std::string ss;
+	std::cin >> ss;
+```
 
 # 性能测试
 ## 测试用例：
 
-ab测试：ab -c100 -n5000 127.0.0.1:8080/
+![qps](lang/qps.png "qps")
 
-服务器返回一个hello。
-
-在一个8核心16G的云主机上测试，qps在9000-13000之间。
-
-## 对比测试
-通过ab测试和boost.beast做对比，二者qps相当，大概是因为二者都是基于boost.asio开发的的原因。cinatra目前还没做专门的性能优化，还有提升空间。
-
+![qps-pipeline](lang/qps-pipeline.png "qps-pipeline")
 
 # 注意事项
 
-文件上传下载，websocket的业务函数是会多次进入的，因此写业务逻辑的时候需要注意，推荐按照示例中的方式去做。
+websocket的业务函数是会多次进入的，因此写业务逻辑的时候需要注意，推荐按照示例中的方式去做。
 
 cinatra目前刚开始在生产环境中使用, 还处于开发完善阶段，可能还有一些bug，因此不建议现阶段直接用于生产环境，建议先在测试环境下试用。
 

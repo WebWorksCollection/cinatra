@@ -15,7 +15,6 @@ namespace fs = std::experimental::filesystem;
 #include "connection.hpp"
 #include "http_router.hpp"
 #include "router.hpp"
-#include "nanolog.hpp"
 #include "function_traits.hpp"
 #include "url_encode_decode.hpp"
 #include "http_cache.hpp"
@@ -40,12 +39,12 @@ namespace cinatra {
 			, ctx_(boost::asio::ssl::context::sslv23)
 #endif
 		{
-			http_cache::set_cache_max_age(86400);
+			http_cache::get().set_cache_max_age(86400);
 			init_conn_callback();
 		}
 
 		void enable_http_cache(bool b) {
-			http_cache::enable_cache(b);
+			http_cache::get().enable_cache(b);
 		}
 
 		template<typename F>
@@ -101,8 +100,9 @@ namespace cinatra {
 					start_accept(acceptor);
 					r = true;
 				}
-				catch (const std::exception& e) {
-					LOG_INFO << e.what();
+				catch (const std::exception& ex) {
+					std::cout << ex.what() << "\n";
+					//LOG_INFO << e.what();
 				}
 			}
 
@@ -114,12 +114,12 @@ namespace cinatra {
 		}
 
 		void run() {
-			if (!fs::exists(public_root_path_.data())) {
-				fs::create_directory(public_root_path_.data());
+			if (!public_root_path_.empty() && !fs::exists(public_root_path_.data())) {
+				fs::create_directories(public_root_path_.data());
 			}
 
 			if (!fs::exists(static_dir_.data())) {
-				fs::create_directory(static_dir_.data());
+				fs::create_directories(static_dir_.data());
 			}
 
 			io_service_pool_.run();
@@ -168,12 +168,12 @@ namespace cinatra {
 		template<http_method... Is, typename Function, typename... AP>
 		void set_http_handler(std::string_view name, Function&& f, AP&&... ap) {
 			if constexpr(has_type<enable_cache<bool>, std::tuple<std::decay_t<AP>...>>::value) {//for cache
-				bool b = true;
-				((b&&(b = need_cache(std::forward<AP>(ap))), false),...);
+				bool b = false;
+				((!b&&(b = need_cache(std::forward<AP>(ap)))),...);
 				if (!b) {
-					http_cache::add_skip(name);
+					http_cache::get().add_skip(name);
 				}else{
-					http_cache::add_single_cache(name);
+					http_cache::get().add_single_cache(name);
 				}
 				auto tp = filter<enable_cache<bool>>(std::forward<AP>(ap)...);
 				auto lm = [this, name, f = std::move(f)](auto... ap) {
@@ -204,20 +204,23 @@ namespace cinatra {
 
         void set_cache_max_age(std::time_t seconds)
 		{
-			http_cache::set_cache_max_age(seconds);
+			http_cache::get().set_cache_max_age(seconds);
 		}
 
 		std::time_t get_cache_max_age()
 		{
-			return http_cache::get_cache_max_age();
+			return http_cache::get().get_cache_max_age();
 		}
 
-
+		//don't begin with "./" or "/", not absolutely path
 		void set_public_root_directory(const std::string& name)
         {
         	if(!name.empty()){
 				public_root_path_ = "./"+name+"/";
-        	}
+			}
+			else {
+				public_root_path_ = "";
+			}
         }
 
         std::string get_public_root_directory()
@@ -225,10 +228,32 @@ namespace cinatra {
             return public_root_path_;
         }
 
+		void set_download_check(std::function<bool(request& req, response& res)> checker) {
+			download_check_ = std::move(checker);
+		}
+
+		//should be called before listen
+		void set_upload_check(std::function<bool(request& req, response& res)> checker) {
+			upload_check_ = std::move(checker);
+		}
+
+		void mapping_to_root_path(std::string relate_path) {
+			relate_paths_.emplace_back("."+std::move(relate_path));
+		}
+
+		void set_not_found_handler(std::function<void(request& req, response& res)> not_found) {
+			not_found_ = std::move(not_found);
+		}
+
+		void set_multipart_begin(std::function<void(request&, std::string&)> begin) {
+			multipart_begin_ = std::move(begin);
+		}
+
 	private:
 		void start_accept(std::shared_ptr<boost::asio::ip::tcp::acceptor> const& acceptor) {
 			auto new_conn = std::make_shared<connection<Socket>>(
-				io_service_pool_.get_io_service(), max_req_buf_size_, keep_alive_timeout_, http_handler_, static_dir_
+				io_service_pool_.get_io_service(), max_req_buf_size_, keep_alive_timeout_, http_handler_, static_dir_, 
+				upload_check_?&upload_check_ : nullptr
 #ifdef CINATRA_ENABLE_SSL
 				, ctx_
 #endif
@@ -236,10 +261,11 @@ namespace cinatra {
 			acceptor->async_accept(new_conn->socket(), [this, new_conn, acceptor](const boost::system::error_code& e) {
 				if (!e) {
 					new_conn->socket().set_option(boost::asio::ip::tcp::no_delay(true));
+					new_conn->set_multipart_begin(multipart_begin_);
 					new_conn->start();
 				}
 				else {
-					LOG_INFO << "server::handle_accept: " << e.message();
+					//LOG_INFO << "server::handle_accept: " << e.message();
 				}
 
 				start_accept(acceptor);
@@ -248,19 +274,44 @@ namespace cinatra {
 
 		void set_static_res_handler()
 		{
-			set_http_handler<POST,GET>(STAIC_RES, [this](request& req, response& res){
+			set_http_handler<POST,GET>(STATIC_RESOURCE, [this](request& req, response& res){
+				if (download_check_) {
+					bool r = download_check_(req, res);
+					if (!r) {
+						res.set_status_and_content(status_type::bad_request);
+						return;
+					}						
+				}
+
 				auto state = req.get_state();
 				switch (state) {
 					case cinatra::data_proc_state::data_begin:
 					{
 						std::string relatice_file_name = req.get_relative_filename();
 						auto mime = req.get_mime({ relatice_file_name.data(), relatice_file_name.length()});
-						if(relatice_file_name.find(public_root_path_) !=0){
-							relatice_file_name.clear();
+						std::wstring source_path = fs::absolute(relatice_file_name).filename().wstring();
+						std::wstring root_path = fs::absolute(public_root_path_).filename().wstring();
+						if(source_path.find(fs::absolute(root_path).filename().wstring()) ==std::string::npos){
+							auto it = std::find_if(relate_paths_.begin(), relate_paths_.end(), [this, &relatice_file_name](auto& str) {
+								auto pos = relatice_file_name.find(str);
+								if (pos != std::string::npos) {
+									relatice_file_name = relatice_file_name.replace(0, str.size(), 
+										public_root_path_.substr(0, public_root_path_.size() - 1));
+								}
+								return pos !=std::string::npos;
+							});
+							if (it == relate_paths_.end()) {
+								res.set_status_and_content(status_type::forbidden);
+								return;
+							}
 						}
 						
 						auto in = std::make_shared<std::ifstream>(relatice_file_name,std::ios_base::binary);
 						if (!in->is_open()) {
+							if (not_found_) {
+								not_found_(req, res);
+								return;
+							}
 							res.set_status_and_content(status_type::not_found,"");
 							return;
 						}
@@ -362,12 +413,24 @@ namespace cinatra {
 		void init_conn_callback() {
             set_static_res_handler();
 			http_handler_ = [this](request& req, response& res) {
-                res.set_base_path(this->base_path_[0],this->base_path_[1]);
+//                res.set_base_path(this->base_path_[0],this->base_path_[1]);
                 res.set_url(req.get_url());
-				bool success = http_router_.route(req.get_method(), req.get_url(), req, res);
-				if (!success) {
-					res.set_status_and_content(status_type::bad_request, "the url is not right");
+				try {
+					bool success = http_router_.route(req.get_method(), req.get_url(), req, res);
+					if (!success) {
+						if (not_found_) {
+							not_found_(req, res);
+							return;
+						}
+						res.set_status_and_content(status_type::bad_request, "the url is not right");
+					}
 				}
+				catch (const std::exception& ex) {
+					res.set_status_and_content(status_type::internal_server_error, ex.what()+std::string(" exception in business function"));
+				}
+				catch (...) {
+					res.set_status_and_content(status_type::internal_server_error, "unknown exception in business function");
+				}				
 			};
 		}
 
@@ -380,13 +443,19 @@ namespace cinatra {
 		std::string static_dir_ = "./public/static/"; //default
         std::string base_path_[2] = {"base_path","/"};
         std::time_t static_res_cache_max_age_ = 0;
-        std::string public_root_path_ = "./public/";
+        std::string public_root_path_ = "./";
 //		https_config ssl_cfg_;
 #ifdef CINATRA_ENABLE_SSL
 		boost::asio::ssl::context ctx_;
 #endif
 
 		http_handler http_handler_ = nullptr;
+		std::function<bool(request& req, response& res)> download_check_;
+		std::vector<std::string> relate_paths_;
+		std::function<bool(request& req, response& res)> upload_check_ = nullptr;
+
+		std::function<void(request& req, response& res)> not_found_ = nullptr;
+		std::function<void(request&, std::string&)> multipart_begin_ = nullptr;
 	};
 
 	using http_server = http_server_<io_service_pool>;
