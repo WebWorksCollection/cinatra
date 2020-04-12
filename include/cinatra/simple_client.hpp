@@ -9,9 +9,16 @@
 #include "response_cv.hpp"
 #include "utils.hpp"
 #include "mime_types.hpp"
+#include "client_factory.hpp"
 
 #ifdef CINATRA_ENABLE_SSL
+
+#ifdef ASIO_STANDALONE
+#include <asio/ssl.hpp>
+#else
 #include <boost/asio/ssl.hpp>
+#endif
+
 #endif
 
 #ifdef _MSC_VER
@@ -24,25 +31,28 @@ namespace fs = std::experimental::filesystem;
 
 namespace cinatra {
 	using client_callback_t = std::function<void(boost::system::error_code, std::string_view)>;
+    using tcp_socket = boost::asio::ip::tcp::socket;
 	//short connection
-	class simple_client : public std::enable_shared_from_this<simple_client> {
+    template<typename SocketType>
+	class simple_client : public std::enable_shared_from_this<simple_client<SocketType>> {
 	public:
+        using type = SocketType;
+        simple_client(boost::asio::io_service& io_context, std::string addr, std::string port, size_t timeout = 60) : ios_(io_context),
+            socket_(io_context), resolver_(io_context), addr_(std::move(addr)),
+            port_(std::move(port)), timer_(io_context), timeout_seconds_(timeout), chunked_size_buf_(10) {
+            if constexpr(is_ssl_) {
 #ifdef CINATRA_ENABLE_SSL
-		simple_client(boost::asio::io_service& io_context, std::string addr, std::string port, boost::asio::ssl::context& context,
-			size_t timeout = 60) : ios_(io_context),
-			socket_(io_context, context), resolver_(io_context), addr_(std::move(addr)),
-			port_(std::move(port)), timer_(io_context), timeout_seconds_(timeout), chunked_size_buf_(10) {
-			socket_.set_verify_mode(boost::asio::ssl::verify_peer);
-			socket_.set_verify_callback([this](auto b, auto& ctx) { return verify_certificate(b, ctx); });
-			chunk_body_.resize(chunk_buf_len + 4);
-		}
+                boost::asio::ssl::context ssl_context(boost::asio::ssl::context::sslv23);
+                ssl_context.set_default_verify_paths();
+                ssl_context.set_options(boost::asio::ssl::context::default_workarounds);
+                ssl_stream_ = std::make_unique<boost::asio::ssl::stream<boost::asio::ip::tcp::socket&>>(socket_, ssl_context);
 #else
-		simple_client(boost::asio::io_service& io_context, std::string addr, std::string port, size_t timeout = 60) : ios_(io_context),
-			socket_(io_context), resolver_(io_context), addr_(std::move(addr)),
-			port_(std::move(port)), timer_(io_context), timeout_seconds_(timeout), chunked_size_buf_(10) {
-			chunk_body_.resize(chunk_buf_len + 4);
-		}
-#endif
+                static_assert(!is_ssl_, "please add definition CINATRA_ENABLE_SSL");//guard, not allowed coming in this branch
+#endif 
+            }
+
+            chunk_body_.resize(chunk_buf_len + 4);
+        }
 
 		~simple_client() {
 			close();
@@ -63,14 +73,15 @@ namespace cinatra {
 					return;
 				}
 
-				boost::asio::async_connect(socket(), it, [this, self](boost::system::error_code ec, const boost::asio::ip::tcp::resolver::iterator&) {
+				boost::asio::async_connect(socket_, it, [this, self](boost::system::error_code ec, const boost::asio::ip::tcp::resolver::iterator&) {
 					if (!ec) {
-#ifdef CINATRA_ENABLE_SSL
-						handshake1();
-#else
-						do_read();
-						do_write();
-#endif						
+                        if constexpr (is_ssl_) {
+                            handshake1();
+                        }
+                        else {
+						    do_read();
+						    do_write();
+                        }
 					}
 					else {
 						std::cout << ec.message() << std::endl;
@@ -102,15 +113,16 @@ namespace cinatra {
 					return;
 				}
 
-				boost::asio::async_connect(socket(), it, [this, self, callback = std::move(callback)](boost::system::error_code ec,
+				boost::asio::async_connect(socket_, it, [this, self, callback = std::move(callback)](boost::system::error_code ec,
 					const boost::asio::ip::tcp::resolver::iterator&) {
 					if (!ec) {
-#ifdef CINATRA_ENABLE_SSL
-						handshake2(std::move(callback));
-#else
-						do_read();
-						do_write(std::move(callback));
-#endif							
+                        if constexpr (is_ssl_) {
+                            handshake1(std::move(callback));
+                        }                        
+                        else {
+						    do_read();
+						    do_write(std::move(callback));
+                        }					
 					}
 					else {
 						std::cout << ec.message() << std::endl;
@@ -125,6 +137,10 @@ namespace cinatra {
 			headers_.emplace_back(std::move(key), std::move(value));
 		}
 
+        void append_header_str(std::string header_str) {
+            header_str_.append(std::move(header_str)).append("\r\n");
+        }
+
 		void set_url_preifx(std::string prefix) {
 			prefix_ = std::move(prefix);
 		}
@@ -134,9 +150,17 @@ namespace cinatra {
 			version_ = " HTTP/1.0\r\n";
 		}
 
+        int status() const {
+            return parser_.status();
+        }
+
 		std::string_view get_header_value(std::string_view key) {
 			return parser_.get_header_value(key);
 		}
+
+        void set_client_callback(client_callback_t callback) {
+            client_callback_ = std::move(callback);
+        }
 
 		void send_form_data(std::string api, std::vector<std::pair<std::string, std::string>> v, 
 			client_callback_t error_callback) {
@@ -156,19 +180,20 @@ namespace cinatra {
 					return;
 				}
 
-				boost::asio::async_connect(socket(), it, [this, self, callback = std::move(callback)](boost::system::error_code ec,
+				boost::asio::async_connect(socket_, it, [this, self, callback = std::move(callback)](boost::system::error_code ec,
 					const boost::asio::ip::tcp::resolver::iterator&) {
 					if (!ec) {
-#ifdef CINATRA_ENABLE_SSL
-						handshake1(std::move(callback));
-#else
-						do_read();
-						do_write(std::move(callback));
-#endif	
+                        if constexpr (is_ssl_) {
+						    handshake1(std::move(callback));
+                        }
+                        else {
+						    do_read();
+						    do_write(std::move(callback));
+                        }
 					}
 					else {
 						std::cout << ec.message() << std::endl;
-						callback({}, "");
+                        callback0(callback, {}, "");
 						close();
 					}
 				});
@@ -220,15 +245,16 @@ namespace cinatra {
 					return;
 				}
 
-				boost::asio::async_connect(socket(), it, [this, self, callback = std::move(callback)](boost::system::error_code ec,
+				boost::asio::async_connect(socket_, it, [this, self, callback = std::move(callback)](boost::system::error_code ec,
 					const boost::asio::ip::tcp::resolver::iterator&) {
 					if (!ec) {
-#ifdef CINATRA_ENABLE_SSL
-						handshake2(std::move(callback));
-#else
-						do_read();
-						do_write_file(std::move(callback));
-#endif
+                        if constexpr (is_ssl_) {
+                            handshake2(std::move(callback));
+                        }
+                        else {
+						    do_read();
+						    do_write_file(std::move(callback));
+                        }
 					}
 					else {
 						callback(ec, "");
@@ -266,16 +292,16 @@ namespace cinatra {
 					return;
 				}
 
-				boost::asio::async_connect(socket(), it, [this, self, callback = std::move(callback)](boost::system::error_code ec,
+				boost::asio::async_connect(socket_, it, [this, self, callback = std::move(callback)](boost::system::error_code ec,
 					const boost::asio::ip::tcp::resolver::iterator&) {
 					if (!ec) {
-#ifdef CINATRA_ENABLE_SSL
-						handshake(std::move(callback));
-#else
-						read_chunk(callback);
-						do_write(callback);
-#endif
-						
+                        if constexpr (is_ssl_) {
+                            handshake(std::move(callback));
+                        }						
+                        else {
+                            read_chunk(callback);
+                            do_write(callback);
+                        }
 					}
 					else {
 						std::cout << ec.message() << std::endl;
@@ -303,12 +329,8 @@ namespace cinatra {
 			std::cout << "close" << std::endl;
 #endif				
 			boost::system::error_code ec;
-#ifdef CINATRA_ENABLE_SSL
-			socket_.shutdown(ec);
-#else
 			socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
-#endif
-			socket().close(ec);
+			socket_.close(ec);
 
 			if (file_.is_open()) {
 				file_.close();
@@ -352,7 +374,13 @@ namespace cinatra {
 					build_content_length(content_length);
 			}
 
-			prefix.append(build_headers()).append("\r\n");
+            if (header_str_.empty()) {
+                prefix.append(build_headers()).append("\r\n");
+            }
+            else {
+                prefix.append(build_headers()).append(std::move(header_str_)).append("\r\n");
+            }
+			
 			total_write_size_ = start_pos_ + prefix.size() + total_multipart_size();
 			return prefix;
 		}
@@ -427,9 +455,9 @@ namespace cinatra {
 			std::string str;
 			for (auto& h : headers_) {
 				str.append(h.first);
-				str.append(name_value_separator);
+				str.append(":");
 				str.append(h.second);
-				str.append(crlf);
+				str.append("\r\n");
 			}
 
 			return str;
@@ -446,7 +474,10 @@ namespace cinatra {
 			boost::asio::async_write(socket(), boost::asio::buffer(write_message_.data(), write_message_.length()),
 				[this, self, error_callback = std::move(error_callback)](boost::system::error_code ec, std::size_t length) {
 				if (!ec) {
+                    client_callback_ = std::move(error_callback);
+#ifdef _DEBUG
 					std::cout << "send ok " << std::endl;
+#endif
 				}
 				else {
 					std::cout << "send failed " << ec.message() << std::endl;
@@ -539,9 +570,11 @@ namespace cinatra {
 
 			return true || preverified;
 		}
+#endif
 
 		void handshake(client_callback_t callback) {
-			socket_.async_handshake(boost::asio::ssl::stream_base::client,
+#ifdef CINATRA_ENABLE_SSL
+            socket().async_handshake(boost::asio::ssl::stream_base::client,
 				[this, callback = std::move(callback)](const boost::system::error_code& ec) {
 				if (!ec) {
 					read_chunk(callback);
@@ -553,10 +586,12 @@ namespace cinatra {
 					close();
 				}
 			});
+#endif
 		}
 
 		void handshake1(client_callback_t callback = nullptr) {
-			socket_.async_handshake(boost::asio::ssl::stream_base::client,
+#ifdef CINATRA_ENABLE_SSL
+			socket().async_handshake(boost::asio::ssl::stream_base::client,
 				[this, callback = std::move(callback)](const boost::system::error_code& ec) {
 				if (!ec) {
 					do_read();
@@ -567,10 +602,12 @@ namespace cinatra {
 					close();
 				}
 			});
+#endif
 		}
 
 		void handshake2(client_callback_t callback) {
-			socket_.async_handshake(boost::asio::ssl::stream_base::client,
+#ifdef CINATRA_ENABLE_SSL
+            socket().async_handshake(boost::asio::ssl::stream_base::client,
 				[this, callback = std::move(callback)](const boost::system::error_code& ec) {
 				if (!ec) {
 					do_read();
@@ -582,21 +619,33 @@ namespace cinatra {
 					close();
 				}
 			});
-		}
 #endif
+		}
 
-		tcp_socket& socket() {
+
+		//tcp_socket& socket() {
+  //          return socket_;
+		//}
+
+        auto& socket() {
+            if constexpr (is_ssl_) {
 #ifdef CINATRA_ENABLE_SSL
-			return socket_.next_layer();
+                return *ssl_stream_;
 #else
-			return socket_;
+                static_assert(!is_ssl_, "please add definition CINATRA_ENABLE_SSL");//guard, not allowed coming in this branch
 #endif
-		}
+            }
+            else {
+                return socket_;
+            }
+        }
 
 		void do_read() {
+            reset_timer();
 			auto self = this->shared_from_this();
-			socket().async_read_some(boost::asio::buffer(parser_.buffer(), parser_.left_size()),
+            socket().async_read_some(boost::asio::buffer(parser_.buffer(), parser_.left_size()),
 				[this, self](boost::system::error_code ec, std::size_t bytes_transferred) {
+                timer_.cancel();
 				if (!ec) {
 					auto last_len = parser_.current_size();
 					bool at_capacity = parser_.update_size(bytes_transferred);
@@ -618,8 +667,29 @@ namespace cinatra {
 						}
 						set_response_msg("parse response error from local server");
 					}
-					else {
-						if (parser_.total_len() > MAX_RESPONSE_SIZE) {
+					else {                        
+                        if (parser_.status() >= 302 && parser_.status()<=307&& parser_.status()!=306) {
+                            auto val = parser_.get_header_value("Location");
+                            if (val.empty()) {
+                                promis_->set_value("");
+                            }
+                            else {
+                                promis_->set_value("Location:" + std::string(val));
+                            }
+                            
+                            close();
+                            return;
+                        }
+
+                        if (parser_.is_chunked()) {
+                            is_chunked_resp_ = true;
+                            std::string_view chunked_content = parser_.curr_content();
+                            handle_chunked(chunked_content, client_callback_);
+                            return;
+                        }
+
+                        //auto ranges_val = parser_.get_header_value("Accept-Ranges");//TODO
+						if (parser_.total_len() > MAX_RESPONSE_SIZE /*&&(ranges_val.empty() || ranges_val == "none")*/) {
 							if (client_callback_) {
 								client_callback_(boost::asio::error::make_error_code(boost::asio::error::no_buffer_space), "");
 							}
@@ -762,7 +832,7 @@ namespace cinatra {
 					error_callback(boost::asio::error::make_error_code(boost::asio::error::invalid_argument), "");
 					return;
 				}
-				error_callback({}, "");
+                callback0(error_callback, {}, "");
 				return;
 			}
 
@@ -874,6 +944,10 @@ namespace cinatra {
 				std::string_view body = { content.data() + pos + 2, (size_t)chunk_len };
 				write_chunked_data(body);
 				size_t offset = pos + 2 + chunk_len + 2;
+                if (offset > content.length()-1) {
+                    break;
+                }
+
 				content = { content.data() + offset, content.size() - offset };				
 			}
 			return true;
@@ -906,7 +980,7 @@ namespace cinatra {
 
 				if (left_chunk_len_ == 0) {
 					chunked_file_.close();
-					callback({}, "");
+                    callback0(callback, {}, "");
 					return;
 				}
 
@@ -917,7 +991,7 @@ namespace cinatra {
 					std::string_view left_data(part_body.data() + left_chunk_len_ + 2, part_body.length() - left_chunk_len_ - 2);
 					if (left_data.size() == 5) { //"\r\n0\r\n"
 						chunked_file_.close();
-						callback({}, "");
+                        callback0(callback, {}, "");
 						return;
 					}
 
@@ -957,7 +1031,7 @@ namespace cinatra {
 				cancel_timer();
 				if (eof) {
 					chunked_file_.close();
-					callback({}, "");
+                    callback0(callback, {}, "");
 					return;
 				}
 
@@ -1005,7 +1079,7 @@ namespace cinatra {
 				write_chunked_data({ chunk_body_.data(), length });
 				if (left_chunk_len_ == 0) {					
 					chunked_file_.close();
-					callback({}, "");
+                    callback0(callback, {}, "");
 					return;
 				}
 
@@ -1018,10 +1092,34 @@ namespace cinatra {
 			});
 		}
 
+        void callback0(const client_callback_t& callback, boost::system::error_code code, std::string_view msg) {
+            if (is_chunked_resp_) {
+                if (promis_) {
+                    promis_->set_value(std::move(chunked_resp_data_));
+                }
+
+                if (callback) {
+                    callback(code, std::move(chunked_resp_data_));
+                }
+
+                close();
+                return;
+            }
+
+            if (callback) {
+                callback(code, msg);
+            }
+        }
+
 		void write_chunked_data(std::string_view chunked_data) {
 			if (on_length_) {
 				on_length_(chunked_data.size());
 			}
+
+            if (is_chunked_resp_) {
+                chunked_resp_data_.append(chunked_data);
+                return;
+            }
 
 			if (on_data_) {
 				on_data_(chunked_data);
@@ -1107,19 +1205,21 @@ namespace cinatra {
 			timer_.cancel();
 		}
 
+        static constexpr bool is_ssl_ = std::is_same_v<SocketType, SSL>;
+
 		boost::asio::io_service& ios_;
 		std::string addr_;
 		std::string port_;
 		boost::asio::ip::tcp::resolver resolver_;
-#ifdef CINATRA_ENABLE_SSL
-		using Socket = boost::asio::ssl::stream<tcp_socket>;
-#else
-		using Socket = tcp_socket;
+
+        tcp_socket socket_;
+#ifdef  CINATRA_ENABLE_SSL
+        std::unique_ptr<boost::asio::ssl::stream<boost::asio::ip::tcp::socket&>> ssl_stream_;
 #endif
-		Socket socket_;
 		std::string write_message_;
 		response_parser parser_;
 		std::vector<std::pair<std::string, std::string>> headers_;
+        std::string header_str_;
 
 		std::string prefix_;
 		std::unique_ptr<std::promise<std::string>> promis_ = nullptr;
@@ -1156,5 +1256,7 @@ namespace cinatra {
 		client_callback_t client_callback_ = nullptr;
 
 		bool has_close_ = false;
+        bool is_chunked_resp_ = false;
+        std::string chunked_resp_data_;
 	};
 }

@@ -34,31 +34,103 @@ struct person
 	int i=0;
 };
 
-int main() {
-	http_server server(std::thread::hardware_concurrency());
+void test_ssl_server(){
 #ifdef CINATRA_ENABLE_SSL
-	server.init_ssl_context(true, [](auto, auto) { return "123456"; }, "server.crt", "server.key", "dh1024.pem");
-	bool r = server.listen("0.0.0.0", "https");
-#else
-	bool r = server.listen("0.0.0.0", "8090");
+    //you should open macro CINATRA_ENABLE_SSL at first
+    http_ssl_server server(2);
+
+    server.set_ssl_conf({ "server.crt", "server.key" });
+    int r = server.listen("0.0.0.0", "9001");
+    if (r < 0) {
+        return;
+    }
+
+    server.set_http_handler<GET, POST>("/", [](request& req, response& res) {
+        auto str = req.get_conn<cinatra::SSL>()->remote_address();
+        res.set_status_and_content(status_type::ok, "hello world from 9001");
+    });
+
+    server.run();
 #endif
+}
+
+void test_client() {
+
+    //http
+    auto s1 = get("baidu.com");
+    auto s2 = post("baidu.com", "your post content");
+
+    auto client = cinatra::client_factory::instance().new_client<cinatra::NonSSL>("baidu.com", "http");
+    auto request_str = client->send_msg<cinatra::TEXT, 3000, cinatra::GET>("/", "");
+    std::cout << request_str << "\n";
+
+    {
+        size_t timeout_second = 5;
+        auto client = cinatra::client_factory::instance().new_client<cinatra::NonSSL>("192.168.96.14", "8090", timeout_second);
+        client->async_send_msg("/", "", [](auto ec, auto data) {
+            if (ec) {
+                std::cout << ec.message() << "\n";
+                return;
+            }
+
+            std::cout << data << "\n";
+        });
+
+        std::getchar();
+    }
+
+    //https
+#ifdef CINATRA_ENABLE_SSL
+    auto s3 = get<cinatra::SSL>("baidu.com/");
+    auto s4 = post<cinatra::SSL>("baidu.com/hello", "your post content");
+
+    {
+        auto client = cinatra::client_factory::instance().new_client<cinatra::SSL>("baidu.com", "https");
+        auto request_str = client->send_msg<cinatra::TEXT, 30000, cinatra::POST>("/", "");
+        std::cout << request_str << "\n";
+    }
+#endif
+}
+
+int main() {
+//    test_client();
+    //test_ssl_server();
+	http_server server(std::thread::hardware_concurrency());
+	bool r = server.listen("0.0.0.0", "8090");
 	if (!r) {
 		//LOG_INFO << "listen failed";
 		return -1;
 	}
 
-	server.set_public_root_directory("");
-    server.set_base_path("base_path","/feather");
 	server.enable_http_cache(false);//set global cache
     server.set_res_cache_max_age(86400);
 	server.set_cache_max_age(5);
-	//server.set_http_handler<GET, POST>("/", [](request& req, response& res) {
-	//	res.set_status_and_content(status_type::ok,"hello world");
-	//},enable_cache{false});
+	server.set_http_handler<GET, POST>("/", [](request& req, response& res) {
+		res.set_status_and_content(status_type::ok,"hello world");
+	});
 
 	server.set_http_handler<GET>("/plaintext", [](request& req, response& res) {
+		//res.set_status_and_content<status_type::ok, res_content_type::string>("Hello, World!");
 		res.set_status_and_content(status_type::ok, "Hello, World!", res_content_type::string);
-	}, enable_cache{ false });
+	});
+
+    //server.set_http_handler<GET, POST>("/delay", [](request& req, response& res) {
+    //    auto conn = req.get_conn<NonSSL>();
+
+    //    //monitor an async operation to test response delay
+    //    std::thread thd([conn, &res] {
+    //        std::this_thread::sleep_for(std::chrono::seconds(3));
+    //        if (!conn->has_close()) {
+    //            res.set_status_and_content(status_type::ok, "hello world");
+    //            conn->response_now();
+    //        }
+    //        else {
+    //            std::cout << "has closed\n";
+    //        }
+    //    });
+    //    thd.detach();
+    //    res.set_delay(true);
+    //});
 
 //	person p{ 2 };
 //	server.set_http_handler<GET, POST>("/a", &person::foo, enable_cache{ false }, log_t{});
@@ -173,31 +245,27 @@ int main() {
 //		res.render_string("hello world");
 //	}, check{}, log_t{});
 //
-//	//web socket
-//	server.set_http_handler<GET, POST>("/ws", [](request& req, response& res) {
-//		assert(req.get_content_type() == content_type::websocket);
-//
-//		req.on(ws_open, [](request& req){
-//			std::cout << "websocket start" << std::endl;
-//		});
-//
-//		req.on(ws_message, [](request& req) {
-//			auto part_data = req.get_part_data();
-//			//echo
-//			std::string str = std::string(part_data.data(), part_data.length());
-//			req.get_conn()->send_ws_string(std::move(str));
-//			std::cout << part_data.data() << std::endl;
-//		});
-//
-//		req.on(ws_close, [](request& req) {
-//			std::cout << "websocket close" << std::endl;
-//		});
-//
-//		req.on(ws_error, [](request& req) {
-//			std::cout << "websocket error" << std::endl;
-//		});
-//	});
-//
+	////web socket
+	//server.set_http_handler<GET, POST>("/ws", [](request& req, response& res) {
+	//	assert(req.get_content_type() == content_type::websocket);
+
+	//	req.on(ws_open, [](request& req){
+	//		std::cout << "websocket start" << std::endl;
+	//	});
+
+	//	req.on(ws_message, [](request& req) {
+	//		auto part_data = req.get_part_data();
+	//		//echo
+	//		std::string str = std::string(part_data.data(), part_data.length());
+	//		req.get_conn()->send_ws_string(std::move(str));
+	//		std::cout << part_data.data() << std::endl;
+	//	});
+
+	//	req.on(ws_error, [](request& req) {
+	//		std::cout << "websocket pack error or network error" << std::endl;
+	//	});
+	//});
+
 //	server.set_http_handler<GET, POST>("/vue_html", [](request& req, response& res) {
 //		res.render_raw_view("./www/index.html");
 //	});

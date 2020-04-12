@@ -24,16 +24,23 @@
 5. 支持面向切面编程
 
 cinatra目前支持了http1.1/1.0, ssl和websocket, 你可以用它轻易地开发一个http服务器，比如常见的数据库访问服务器、文件上传下载服务器、实时消息推送服务器，你也可以基于cinatra开发一个mqtt服务器。
+cinatra是世界上性能最好的http服务器之一，性能测试详见[性能测试](#性能测试)
+
+## 谁在用cinatra
+
+cinatra目前被很多公司在使用，在这里可以看到[谁在用cinatra](https://github.com/qicosmos/cinatra/wiki/%E8%B0%81%E5%9C%A8%E7%94%A8cinatra).
 
 # 如何使用
 
 ## 编译依赖
 cinatra是基于boost.asio开发的，所以需要boost库。不过，cinatra同时也支持了ASIO_STANDALONE，你不必一定需要boost库。
 
-cinatra需要支持c++17的编译器，依赖项：
+cinatra需要的依赖项：
 
-1. boost.asio
-2. c++17编译器(gcc7.2,clang4.0, vs2017 update15.5)
+1. C++17 编译器 (gcc 7.2, clang 4.0, Visual Studio 2017 update 15.5,或者更高的版本)
+2. Boost.Asio(或者独立的 Asio)
+3. Boost.System
+4. UUID 库 (Windows: objbase.h , Linux: uuid.h, Mac: CFUUID.h)
 
 ## 使用
 cinatra是header-only的，直接引用头文件既可。
@@ -223,13 +230,9 @@ cinatra目前支持了multipart和octet-stream格式的上传。
 				req.get_conn()->send_ws_string(std::move(str));
 				std::cout << part_data.data() << std::endl;
 			});
-	
-			req.on(ws_close, [](request& req) {
-				std::cout << "websocket close" << std::endl;
-			});
-	
+
 			req.on(ws_error, [](request& req) {
-				std::cout << "websocket error" << std::endl;
+				std::cout << "websocket pack error or network error" << std::endl;
 			});
 		});
 
@@ -271,13 +274,16 @@ cinatra目前支持了multipart和octet-stream格式的上传。
 
 ### 发get/post消息
 ```
-auto client = cinatra::client_factory::instance().new_client("127.0.0.1", "8080");
+auto client = cinatra::client_factory::instance().new_client<cinatra::NonSSL>("127.0.0.1", "8080");
 client->send_msg("/string", "hello"); //post json, default timeout is 3000ms
 client->send_msg<TEXT>("/string", "hello"); //post string, default timeout is 3000ms
 
 client->send_msg<TEXT, 2000>("/string", "hello"); //post string, timeout is 2000ms
 
 client->send_msg<TEXT, 3000, GET>("/string", "hello"); //get string, timeout is 3000ms
+
+    auto s1 = cinatra::get("baidu.com");
+    auto s2 = cinatra::post("baidu.com", "your post content");
 ```
 
 ### 文件上传
@@ -286,7 +292,7 @@ client->send_msg<TEXT, 3000, GET>("/string", "hello"); //get string, timeout is 
 注意：在client文件上传结束之前不要重新上传文件。
 
 ```
-auto client = cinatra::client_factory::instance().new_client("127.0.0.1", "8080");
+auto client = cinatra::client_factory::instance().new_client<cinatra::NonSSL>("127.0.0.1", "8080");
 client->on_progress([](std::string progress) {
 	std::cout << progress << "\n";
 });
@@ -305,7 +311,7 @@ client->upload_file("/upload_multipart", filename, [](auto ec) {
 ```
 	for (auto& filename : v) {
 
-		auto client = cinatra::client_factory::instance().new_client("127.0.0.1", "8080");
+		auto client = cinatra::client_factory::instance().new_client<cinatra::NonSSL>("127.0.0.1", "8080");
 		client->on_progress([](std::string progress) {
 			std::cout << progress << "\n";
 		});
@@ -325,7 +331,7 @@ client->upload_file("/upload_multipart", filename, [](auto ec) {
 ### 文件下载
 
 ```
-auto client = cinatra::client_factory::instance().new_client("127.0.0.1", "8080");
+auto client = cinatra::client_factory::instance().new_client<cinatra::NonSSL>("127.0.0.1", "8080");
 auto s = "/public/static/test1.png";
 auto filename = std::filesystem::path(s).filename().string();
 client->download_file("temp", filename, s, [](auto ec) {
@@ -357,10 +363,7 @@ on_length回调下载的数据的长度；
 on_data回调下下载的数据，注意，如果设置了on_data，cinatra将不会去将下载的数据存到文件中，而是完全交给用户去处理；如果没有设置该回调则会默认存文件。
 
 ```
-	boost::asio::ssl::context ctx(boost::asio::ssl::context::sslv23);
-	ctx.set_default_verify_paths();
-
-	auto client = cinatra::client_factory::instance().new_client("127.0.0.1", "https", ctx);
+	auto client = cinatra::client_factory::instance().new_client<cinatra::SSL>("127.0.0.1", "https");
 	client->on_length([](size_t _length) {
 		std::cout << "download file: on_length: " << _length << std::endl;
 	});
